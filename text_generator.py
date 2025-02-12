@@ -2,6 +2,61 @@ import tkinter as tk
 from tkinter import ttk, messagebox
 from db_manager import DBManager
 
+class ToolTip:
+    """工具提示类
+    数据结构：
+    - self.widget: 需要显示提示的控件
+    - self.text: 提示文本内容
+    - self.tooltip: 提示窗口实例
+    
+    功能：
+    - 当鼠标悬停在控件上时显示提示文本
+    - 当鼠标离开时自动隐藏提示
+    """
+    def __init__(self, widget, text):
+        """初始化工具提示
+        参数：
+            widget: 需要添加提示的控件
+            text: 提示文本内容
+        """
+        self.widget = widget
+        self.text = text
+        self.tooltip = None
+        # 绑定鼠标事件
+        self.widget.bind('<Enter>', self.show_tooltip)
+        self.widget.bind('<Leave>', self.hide_tooltip)
+
+    def show_tooltip(self, event=None):
+        """显示提示窗口
+        数据流向：
+        1. 计算提示窗口显示位置
+        2. 创建顶层窗口
+        3. 配置窗口样式
+        4. 显示提示文本
+        """
+        x, y, _, _ = self.widget.bbox("insert")
+        x += self.widget.winfo_rootx() + 25
+        y += self.widget.winfo_rooty() + 20
+
+        # 创建工具提示窗口
+        self.tooltip = tk.Toplevel(self.widget)
+        self.tooltip.wm_overrideredirect(True)  # 移除窗口装饰
+        self.tooltip.wm_geometry(f"+{x}+{y}")
+
+        label = ttk.Label(self.tooltip, text=self.text, 
+                         background="#ffffe0", relief='solid', borderwidth=1)
+        label.pack()
+
+    def hide_tooltip(self, event=None):
+        """隐藏提示窗口
+        功能：
+        - 销毁提示窗口
+        - 重置tooltip属性
+        """
+        if self.tooltip:
+            self.tooltip.destroy()
+            self.tooltip = None
+
 class TextGenerator:
     def __init__(self, root):
         """初始化文本生成器
@@ -30,9 +85,12 @@ class TextGenerator:
         
         # 初始化数据库管理器并加载数据
         self.db_manager = DBManager()
-        self.tags = self.db_manager.get_all_tags()  # 从数据库获取所有标签
-        self.tag_brackets = {tag: 0 for tag in self.tags}  # 为每个标签初始化括号计数
-        self.selected_tags = []  # 存储用户选择的标签
+        self.tags = {}  # {tag_name: context} 存储标签名和对应的文本内容
+        for tag_name, context in self.db_manager.get_all_tags():
+            self.tags[tag_name] = context
+        self.tag_brackets = {tag_name: 0 for tag_name in self.tags.keys()}  # 所有标签的括号数量
+        self.selected_tags = []  # 当前选中的标签
+        self.remembered_brackets = {}  # 新增：记住每个标签的括号数量
         
         # 添加新的实例变量
         self.tag_buttons = {}      # 存储标签按钮引用
@@ -57,170 +115,227 @@ class TextGenerator:
         self.create_level_controls()  # 创建层级控制区域
 
     def create_add_tag_area(self):
-        # 创建添加新标签的框架
+        """创建添加新标签区域"""
         add_frame = ttk.LabelFrame(self.main_frame, text="添加新标签")
         add_frame.pack(padx=10, pady=5, fill="x")
         
-        # 创建输入框
-        self.new_tag_entry = ttk.Entry(add_frame)
-        self.new_tag_entry.pack(side="left", padx=5, pady=5)
+        # 创建标签名称输入区域
+        name_frame = ttk.Frame(add_frame)
+        name_frame.pack(fill="x", padx=5, pady=2)
+        ttk.Label(name_frame, text="标签名称:").pack(side="left")
+        self.new_tag_entry = ttk.Entry(name_frame)
+        self.new_tag_entry.pack(side="left", padx=5, fill="x", expand=True)
+        
+        # 创建标签内容输入区域
+        context_frame = ttk.Frame(add_frame)
+        context_frame.pack(fill="x", padx=5, pady=2)
+        ttk.Label(context_frame, text="标签内容:").pack(side="left")
+        self.context_entry = ttk.Entry(context_frame)
+        self.context_entry.pack(side="left", padx=5, fill="x", expand=True)
+        
+        # 添加提示文本
+        ttk.Label(add_frame, 
+                 text="注：标签内容为空时将使用标签名称",
+                 font=("", 8),
+                 foreground="gray").pack(pady=(0,5))
         
         # 创建添加按钮
         add_btn = ttk.Button(add_frame, text="添加标签", command=self.add_new_tag)
-        add_btn.pack(side="left", padx=5, pady=5)
+        add_btn.pack(pady=5)
 
     def create_tag_area(self):
-        """创建标签区域
-        功能：
-            1. 创建可滚动的标签区域
-            2. 为每个标签创建状态显示
-            3. 显示括号数量
-        """
+        """创建标签区域"""
         tag_frame = ttk.LabelFrame(self.main_frame, text="选择标签")
-        tag_frame.pack(padx=10, pady=5, fill="x")
+        tag_frame.pack(padx=10, pady=5, fill="both", expand=True)
         
-        # 使用Canvas和Scrollbar创建可滚动区域
-        canvas = tk.Canvas(tag_frame, height=150)
-        scrollbar = ttk.Scrollbar(tag_frame, orient="horizontal", command=canvas.xview)
-        scrollable_frame = ttk.Frame(canvas)
+        # 创建搜索框
+        search_frame = ttk.Frame(tag_frame)
+        search_frame.pack(fill="x", padx=5, pady=2)
+        ttk.Label(search_frame, text="搜索:").pack(side="left")
+        self.search_var = tk.StringVar()
+        self.search_var.trace('w', self.filter_tags)
+        search_entry = ttk.Entry(search_frame, textvariable=self.search_var)
+        search_entry.pack(side="left", fill="x", expand=True)
+        
+        # 创建标签显示区域
+        self.tags_canvas = tk.Canvas(tag_frame)
+        scrollbar_y = ttk.Scrollbar(tag_frame, orient="vertical", 
+                                   command=self.tags_canvas.yview)
+        scrollbar_x = ttk.Scrollbar(tag_frame, orient="horizontal", 
+                                   command=self.tags_canvas.xview)
+        
+        # 创建网格布局框架
+        self.tags_frame = ttk.Frame(self.tags_canvas)
+        self.tags_per_row = 6  # 每行显示的标签数
+        
+        # 初始显示所有标签
+        self.update_tags_display()
+        
+        # 配置滚动
+        self.tags_canvas.create_window((0, 0), window=self.tags_frame, anchor="nw")
+        self.tags_frame.bind("<Configure>", 
+                            lambda e: self.tags_canvas.configure(
+                                scrollregion=self.tags_canvas.bbox("all")))
+        
+        # 布局组件
+        self.tags_canvas.configure(yscrollcommand=scrollbar_y.set,
+                                 xscrollcommand=scrollbar_x.set)
+        self.tags_canvas.pack(side="left", fill="both", expand=True)
+        scrollbar_y.pack(side="right", fill="y")
+        scrollbar_x.pack(side="bottom", fill="x")
 
-        canvas.configure(xscrollcommand=scrollbar.set)
+    def update_tags_display(self, filtered_tags=None):
+        """更新标签显示
+        参数:
+            filtered_tags: 过滤后的标签列表，None表示显示所有标签
+        """
+        # 清除现有标签
+        for widget in self.tags_frame.winfo_children():
+            widget.destroy()
         
-        # 创建标签按钮和状态显示
-        for tag in self.tags:
-            tag_container = ttk.Frame(scrollable_frame)
-            tag_container.pack(side="left", padx=5, pady=5)
+        # 确定要显示的标签
+        tags_to_show = filtered_tags if filtered_tags is not None else self.tags
+        
+        # 计算最长标签名的长度
+        max_length = max(len(tag) for tag in tags_to_show) if tags_to_show else 10
+        button_width = min(max_length, 20)  # 限制最大宽度为20
+        
+        # 使用网格布局放置标签
+        for i, tag in enumerate(tags_to_show):
+            row = i // self.tags_per_row
+            col = i % self.tags_per_row
             
-            # 创建标签状态容器
-            status_frame = ttk.Frame(tag_container)
-            status_frame.pack(side="top")
+            # 创建标签容器
+            tag_container = ttk.Frame(self.tags_frame)
+            tag_container.grid(row=row, column=col, padx=2, pady=2, sticky="nsew")
             
-            # 标签按钮 - 使用tk.Button以支持背景色变化
-            btn = tk.Button(status_frame, text=tag,
+            # 标签按钮
+            btn = tk.Button(tag_container, 
+                          text=tag,
+                          width=10,  # 固定宽度为10
+                          anchor="w",
+                          justify="left",
                           command=lambda t=tag: self.toggle_tag(t))
-            btn.pack(side="left")
             
-            # 括号计数显示
-            count_label = ttk.Label(status_frame, text="0")
+            # 添加工具提示
+            self.create_tooltip(btn, tag)
+            btn.pack(side="left", padx=1)
+            
+            # 括号计数和控制按钮
+            count_frame = ttk.Frame(tag_container)
+            count_frame.pack(side="left")
+            
+            # 显示记忆的括号数量（如果有）或0
+            initial_count = "0"
+            if tag in self.selected_tags:
+                initial_count = str(self.tag_brackets[tag])
+            elif tag in self.remembered_brackets:
+                initial_count = str(self.remembered_brackets[tag])
+            
+            count_label = ttk.Label(count_frame, text=initial_count, width=2)
             count_label.pack(side="left")
             
-            # 保存组件引用以便更新
+            ttk.Button(count_frame, text="+", width=2,
+                    command=lambda t=tag: self.add_brackets(t)).pack(side="left")
+            ttk.Button(count_frame, text="-", width=2,
+                    command=lambda t=tag: self.remove_brackets(t)).pack(side="left")
+            
             self.tag_buttons[tag] = btn
             self.bracket_counts[tag] = count_label
-            
-            # 括号按钮区域
-            bracket_frame = ttk.Frame(tag_container)
-            bracket_frame.pack(side="left")
-            
-            # 增加括号按钮
-            add_bracket_btn = ttk.Button(bracket_frame, text="+{ }", 
-                                      command=lambda t=tag: self.add_brackets(t))
-            add_bracket_btn.pack(side="left")
-            
-            # 减少括号按钮
-            sub_bracket_btn = ttk.Button(bracket_frame, text="-{ }", 
-                                      command=lambda t=tag: self.remove_brackets(t))
-            sub_bracket_btn.pack(side="left")
 
-        # 配置滚动区域
-        canvas.create_window((0, 0), window=scrollable_frame, anchor="nw")
-        scrollable_frame.bind("<Configure>", 
-                            lambda e: canvas.configure(scrollregion=canvas.bbox("all")))
-        
-        canvas.pack(fill="x", expand=True)
-        scrollbar.pack(fill="x")
+    def filter_tags(self, *args):
+        """根据搜索文本过滤标签"""
+        search_text = self.search_var.get().lower()
+        if not search_text:
+            self.update_tags_display()
+        else:
+            filtered = [tag for tag in self.tags 
+                       if search_text in tag.lower()]
+            self.update_tags_display(filtered)
 
     def add_new_tag(self):
         """添加新标签的方法
-        1. 检查输入的标签是否有效
-        2. 保存到数据库
-        3. 更新内存中的数据结构
-        4. 重建界面显示新标签
+        数据流向：
+        1. 获取输入的标签名和内容
+        2. 验证输入有效性
+        3. 保存到数据库
+        4. 更新内存中的数据结构
+        5. 重建界面显示
         """
-        new_tag = self.new_tag_entry.get().strip()  # 获取输入框的内容并去除首尾空格
-        if new_tag:  # 如果输入不为空
-            if new_tag not in self.tags:  # 检查标签是否已存在
-                # 先尝试保存到数据库
-                if self.db_manager.add_tag(new_tag):
-                    # 数据库保存成功后，更新内存中的数据结构
-                    self.tags.append(new_tag)  # self.tags 是内存中的标签列表，与数据库同步
-                    self.tag_brackets[new_tag] = 0  # 初始化新标签的括号计数器
+        new_tag = self.new_tag_entry.get().strip()
+        context = self.context_entry.get().strip()  # 获取context内容
+        
+        if new_tag:
+            if new_tag not in self.tags:
+                # 如果context为空，使用tag_name作为context
+                if not context:
+                    context = new_tag
+                    
+                if self.db_manager.add_tag(new_tag, context):
+                    # 更新内存中的数据
+                    self.tags[new_tag] = context  # 使用字典的赋值而不是append
                     
                     # 重建整个界面以显示新标签
                     for widget in self.main_frame.winfo_children():
-                        widget.destroy()  # 清除所有现有组件
+                        widget.destroy()
                     
                     # 重新创建所有界面组件
-                    self.create_add_tag_area()   # 重建添加标签区域
-                    self.create_tag_area()       # 重建标签按钮区域
-                    self.create_output_area()    # 重建输出文本区域
-                    self.create_clear_button()   # 重建清除按钮
+                    self.create_add_tag_area()
+                    self.create_tag_area()
+                    self.create_output_area()
+                    self.create_clear_button()
                     
-                    self.new_tag_entry.delete(0, tk.END)  # 清空输入框
+                    # 清空输入框
+                    self.new_tag_entry.delete(0, tk.END)
+                    self.context_entry.delete(0, tk.END)
                 else:
-                    messagebox.showerror("错误", "添加标签失败！")  # 数据库操作失败时显示错误
+                    messagebox.showerror("错误", "添加标签失败！")
             else:
-                messagebox.showwarning("警告", "该标签已存在！")  # 标签重复时显示警告
+                messagebox.showwarning("警告", "该标签已存在！")
 
     def add_brackets(self, tag):
         """为指定标签添加一对花括号
-        参数:
-            tag: 要添加括号的标签名
-        功能:
-            1. 检查标签是否被选中
-            2. 增加标签的括号计数
-            3. 更新输出文本
+        数据流向：
+        1. self.tag_brackets[tag] 增加括号计数
+        2. self.bracket_counts[tag] 更新显示的数字
+        3. update_output() 重新生成输出文本
         """
-        if tag in self.selected_tags:  # 只处理已选中的标签
-            self.tag_brackets[tag] += 1  # 增加括号计数
-            self.update_output()  # 更新显示的文本
-
-    def add_tag(self, tag):
-        """添加标签到选中列表
-        参数:
-            tag: 要添加的标签名
-        功能:
-            1. 检查标签是否已选中
-            2. 添加到选中列表
-            3. 重置括号计数
-            4. 更新数据库使用统计
-            5. 更新输出文本
-        """
-        if tag not in self.selected_tags:
-            self.selected_tags.append(tag)  # 添加到选中列表
-            self.tag_brackets[tag] = 0  # 重置括号计数
-            self.db_manager.update_tag_usage(tag)  # 更新数据库中的使用次数
-            self.update_output()  # 更新显示的文本
+        if tag in self.selected_tags:
+            self.tag_brackets[tag] += 1  # 括号计数加1
+            # Tkinter的Label需要字符串类型，所以用str()转换数字
+            self.bracket_counts[tag].configure(text=str(self.tag_brackets[tag]))
+            self.update_output()
 
     def update_output(self):
         """更新输出文本
-        功能:
-            1. 按层级对标签进行分组
-            2. 为每组添加相应数量的括号
-            3. 更新显示
+        数据处理流程：
+        1. 按括号数量对标签分组 -> bracket_groups
+        2. 为每组标签添加对应数量的括号
+        3. 将所有组合并为最终输出
         """
-        # 按括号数量分组
-        bracket_groups = {}  # {bracket_count: [tags]}
+        # 按括号数量分组 {count: [contexts]}
+        bracket_groups = {}
         for tag in self.selected_tags:
             count = self.tag_brackets[tag]
             if count not in bracket_groups:
                 bracket_groups[count] = []
-            bracket_groups[count].append(tag)
+            bracket_groups[count].append(self.tags[tag])
         
         # 生成输出文本
         output_parts = []
-        for count, tags in bracket_groups.items():
-            # 将同组标签用逗号连接
-            group_text = ", ".join(tags)
-            # 添加括号
+        for count, contexts in sorted(bracket_groups.items()):
+            group_text = ", ".join(contexts)  # 同组标签用逗号连接
+            # 添加指定数量的花括号
             for _ in range(count):
                 group_text = "{" + group_text + "}"
-            output_parts.append(group_text)
+            if group_text:
+                output_parts.append(group_text)
         
-        # 用逗号连接不同组
-        output = ", ".join(output_parts)
+        # 更新文本框显示
+        output = ", ".join(output_parts)  # 不同组用逗号连接
         self.output_text.delete(1.0, tk.END)
-        self.output_text.insert(tk.END, output)
+        if output:
+            self.output_text.insert(tk.END, output)
 
     def create_output_area(self):
         """创建输出区域"""
@@ -236,29 +351,42 @@ class TextGenerator:
         clear_btn.pack(pady=5)
 
     def clear_all(self):
+        """清除所有选择和括号数量"""
         self.selected_tags.clear()
+        self.remembered_brackets.clear()  # 清除记忆的括号数量
         # 重置所有标签的括号数量
         for tag in self.tag_brackets:
             self.tag_brackets[tag] = 0
+            self.bracket_counts[tag].configure(text="0")
         self.output_text.delete(1.0, tk.END)
 
     def toggle_tag(self, tag):
         """切换标签选中状态
-        参数：
-            tag: 要切换的标签名
-        功能：
-            1. 切换选中状态
-            2. 更新按钮显示
-            3. 更新输出文本
+        数据流向：
+        1. self.selected_tags 更新选中状态
+        2. self.tag_buttons[tag] 更新按钮显示
+        3. self.remembered_brackets[tag] 保存/恢复括号数量
+        4. self.bracket_counts[tag] 更新显示的数字
         """
         if tag in self.selected_tags:
+            # 取消选中
             self.selected_tags.remove(tag)
-            self.tag_buttons[tag].configure(bg="SystemButtonFace")  # 默认颜色
+            self.tag_buttons[tag].configure(bg="SystemButtonFace")  # 设置按钮回到默认颜色
+            # 保存当前括号数量
+            self.remembered_brackets[tag] = self.tag_brackets[tag]
         else:
+            # 选中标签
             self.selected_tags.append(tag)
-            self.tag_buttons[tag].configure(bg="lightblue")  # 选中颜色
+            self.tag_buttons[tag].configure(bg="lightblue")  # 设置按钮为选中颜色
+            # 恢复之前的括号数量（如果有）
+            if tag in self.remembered_brackets:
+                self.tag_brackets[tag] = self.remembered_brackets[tag]
+            else:
+                self.tag_brackets[tag] = 0
             self.db_manager.update_tag_usage(tag)
         
+        # 更新显示的数字
+        self.bracket_counts[tag].configure(text=str(self.tag_brackets[tag]))
         self.update_output()
 
     def load_bracket_levels(self):
@@ -454,6 +582,10 @@ class TextGenerator:
         # 关闭数据库连接
         if hasattr(self, 'db_manager'):
             self.db_manager.close()
+
+    def create_tooltip(self, widget, text):
+        """为控件创建工具提示"""
+        ToolTip(widget, text)
 
 def main():
     root = tk.Tk()

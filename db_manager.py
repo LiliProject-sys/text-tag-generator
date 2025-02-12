@@ -31,29 +31,37 @@ class DBManager:
             print("数据库连接已关闭")
 
     def get_all_tags(self):
-        """获取所有标签"""
+        """获取所有标签
+        返回：
+            list: [(tag_name, context), ...]
+        """
         try:
+            # 添加连接检查
             if not self.connection or not self.connection.is_connected():
                 self.connect()
             
             cursor = self.connection.cursor()
-            cursor.execute("SELECT tag_name FROM tags ORDER BY use_count DESC")
-            tags = [row[0] for row in cursor.fetchall()]
+            cursor.execute("SELECT tag_name, context FROM tags ORDER BY use_count DESC")
+            tags = cursor.fetchall()  # 返回(tag_name, context)元组列表
             cursor.close()
             return tags
         except Error as e:
             print(f"获取标签错误: {e}")
             return []
 
-    def add_tag(self, tag_name):
-        """添加新标签"""
+    def add_tag(self, tag_name, context=None):
+        """添加新标签
+        参数：
+            tag_name: 标签显示名称
+            context: 标签文本内容，为None时使用tag_name
+        """
         try:
             if not self.connection or not self.connection.is_connected():
                 self.connect()
-                
+            
             cursor = self.connection.cursor()
-            sql = "INSERT IGNORE INTO tags (tag_name) VALUES (%s)"
-            cursor.execute(sql, (tag_name,))
+            sql = "INSERT INTO tags (tag_name, context) VALUES (%s, %s)"
+            cursor.execute(sql, (tag_name, context or tag_name))
             self.connection.commit()
             cursor.close()
             return True
